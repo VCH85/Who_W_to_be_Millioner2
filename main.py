@@ -1,105 +1,145 @@
-import sqlite3
 import telebot
-from gevent.libev.corecext import callback
-from pyexpat.errors import messages
 from telebot import types
+import sqlite3
+import random
+import datetime
+
+# Токен вашего бота
+TOKEN = '7826590907:AAF3e4KsK8c3rUHHWSpjYvihuGdD8IhAzBs'
+
+# Подключение к базе данных
+conn = sqlite3.connect('data/questions.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Инициализация бота
+bot = telebot.TeleBot(TOKEN)
+
+# Словарь для хранения состояния пользователей
+users_state = {}
+
+# Стоимость вопросов
+PRIZES = [3000000, 1500000, 800000, 400000, 200000, 100000, 50000, 25000, 15000, 10000, 5000, 3000, 2000, 1000, 500]
+
+# Несгораемые суммы
+SAFETY_NETS = [5000, 10000, 50000, 100000, 200000, 400000, 800000, 1500000, 3000000]
+
+# Список подсказок
+HINTS = ['Помощь зала', '50 на 50', 'Звонок другу', 'Право на ошибку', 'Замена вопроса']
 
 
-db_name = "data/demo.db"
-
-bot = telebot.TeleBot("7826590907:AAF3e4KsK8c3rUHHWSpjYvihuGdD8IhAzBs", parse_mode="HTML")
-
-
-def get_question(level):
-    global  q
-    cn = sqlite3.connect(db_name)
-
-    sql = '''SELECT * FROM Questions WHERE level = ? ORDER by random() LIMIT 1'''
-    cur = cn.cursor()
-    cur.execute(sql, [level])
-    q = cur.fetchone()
-
-    cn.commit()
-    cn.close()
-    return q
+# Функция для получения случайного вопроса определенного уровня
+def get_random_question(level):
+    cursor.execute("SELECT * FROM questions WHERE level = ?", (level,))
+    rows = cursor.fetchall()
+    return random.choice(rows) if rows else None
 
 
-@bot.message_handler(commands=["start"])
-def start(message):
+# Функция для обработки начала игры
+@bot.message_handler(commands=['start'])
+def start_game(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "Привет, new - новая игра, rules - правила игры")
+    user_name = message.from_user.first_name
+
+    users_state[chat_id] = {
+        "current_level": 1,
+        "total_score": 0,
+        "used_hints": [],
+        "safety_net": SAFETY_NETS[0],
+        "game_over": False
+    }
+
+    bot.send_message(chat_id, f"Здравствуйте, {user_name}! Добро пожаловать в игру 'Кто хочет стать миллионером?'")
+    ask_next_question(chat_id)
 
 
-@bot.message_handler(commands= ["rules", "r"])
-def game_rules(message):
-    chat_id = message.chat.id
-    with open(file= "data/rules.txt", encoding="utf-8") as rules_g:
-        bot.send_message(chat_id, rules_g)
+# Функция для вывода следующего вопроса
+def ask_next_question(chat_id):
+    state = users_state.get(chat_id)
+    if not state or state["game_over"]:
+        return
+
+    current_level = state["current_level"]
+    question_data = get_random_question(current_level)
+
+    if not question_data:
+        bot.send_message(chat_id, "Извините, но у нас нет больше вопросов этого уровня.")
+        return
+
+    question_text = question_data[1]
+    options = [question_data[2], question_data[3], question_data[4],
+               question_data[5]]
+    correct_answer = question_data[6] - 1
+
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    for i in range(4):
+        button = types.InlineKeyboardButton(text=f"{chr(ord('A') + i)}. {options[i]}", callback_data=str(i))
+        keyboard.add(button)
+
+    bot.send_message(chat_id, f"Вопрос №{current_level}: {question_text}", reply_markup=keyboard)
 
 
-@bot.message_handler(commands=["new"])
-def new_game(message):
-    get_question(1)
-    chat_id = message.chat.id
-    keyboard = types.InlineKeyboardMarkup()
-    button1 = types.InlineKeyboardButton(text=f"{q[2]}", callback_data= "1")
-    button2 = types.InlineKeyboardButton(text=f"{q[3]}", callback_data= "2")
-    button3 = types.InlineKeyboardButton(text=f"{q[4]}", callback_data= "3")
-    button4 = types.InlineKeyboardButton(text=f"{q[5]}", callback_data= "4")
-    keyboard.add(button1, button2)
-    keyboard.add(button3, button4)
-    bot.send_message(chat_id, f"Игра начинается. Вопрос: {q[1]}", reply_markup=keyboard)
+# Обработчик нажатия кнопок вариантов ответа
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    state = users_state.get(chat_id)
+    if not state or state["game_over"]:
+        return
 
-@bot.callback_query_handler(func=lambda call: call.data == "1")
-def next_turn(call):
-    global q
-    message = call.message
-    chat_id = message.chat.id
-    right_answer = q[7]
-    if int(call.data) == int(right_answer):
-        bot.send_message(chat_id, "Это правильный ответ. Следующий вопрос:")
+    answer_index = int(call.data)
+    question_data = get_random_question(state["current_level"])
+    correct_answer = int(question_data[7])
+    print(question_data[7],correct_answer)
+    if answer_index == correct_answer:
+        prize = PRIZES[state["current_level"] - 1]
+        state["total_score"] = prize
+
+        next_level = state["current_level"] + 1
+        if next_level > len(PRIZES):
+            end_game(chat_id, prize)
+        else:
+            state["current_level"] = next_level
+            bot.edit_message_text(f"Правильный ответ! Вы выиграли {prize}. Переходим к следующему вопросу.", chat_id,
+                                  call.message.message_id)
+            ask_next_question(chat_id)
     else:
-        bot.send_message(chat_id, f"Это не верный ответ! Прощайте!")
-    print(call.data)
-    print(right_answer)
-@bot.callback_query_handler(func=lambda call: call.data == "2")
-def next_turn(call):
-    message = call.message
+        safety_net = state["safety_net"]
+        end_game(chat_id, safety_net)
+
+
+# Завершение игры
+def end_game(chat_id, final_score):
+    state = users_state.get(chat_id)
+    if not state:
+        return
+
+    state["game_over"] = True
+    bot.send_message(chat_id,
+                     f"К сожалению, вы дали неверный ответ. Ваша итоговая сумма составляет {final_score}. Спасибо за участие!")
+
+    # Сохранение результата в базу данных
+    username = bot.get_chat_member(chat_id, chat_id).user.first_name
+    cursor.execute("INSERT INTO records (username, score, timestamp) VALUES (?, ?, ?)",
+                   (username, final_score, datetime.datetime.now()))
+    conn.commit()
+
+
+# Команда для просмотра топ-10 игроков
+@bot.message_handler(commands=['top'])
+def show_top_records(message):
     chat_id = message.chat.id
-    right_answer = q[7]
-    if int(call.data) == int(right_answer):
-        bot.send_message(chat_id, "Это правильный ответ. Следующий вопрос:")
-    else:
-        bot.send_message(chat_id, f"Это не верный ответ! Прощайте!")
-    print(call.data)
-    print(right_answer)
-@bot.callback_query_handler(func=lambda call: call.data == "3")
-def next_turn(call):
-    message = call.message
-    chat_id = message.chat.id
-    right_answer = q[7]
-    if int(call.data) == int(right_answer):
-        bot.send_message(chat_id, "Это правильный ответ. Следующий вопрос:")
-    else:
-        bot.send_message(chat_id, f"Это не верный ответ! Прощайте!")
-    print(call.data)
-    print(right_answer)
 
-@bot.callback_query_handler(func=lambda call: call.data == "4")
-def next_turn(call):
-    message = call.message
-    chat_id = message.chat.id
-    right_answer = q[7]
-    if int(call.data) == int(right_answer):
-        bot.send_message(chat_id, "Это правильный ответ. Следующий вопрос:")
-    else:
-        bot.send_message(chat_id, f"Это не верный ответ! Прощайте!")
-    print(call.data)
-    print(right_answer)
+    cursor.execute("SELECT username, score FROM records ORDER BY score DESC LIMIT 10")
+    rows = cursor.fetchall()
+
+    top_text = "Топ-10 игроков:\n"
+    for i, row in enumerate(rows):
+        username, score = row
+        top_text += f"{i + 1}. {username} - {score}\n"
+
+    bot.send_message(chat_id, top_text)
 
 
-
-
-
-bot.infinity_polling()
-
+# Запуск бота
+if __name__ == "__main__":
+    bot.polling(none_stop=True)
